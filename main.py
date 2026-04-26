@@ -1,6 +1,6 @@
 # main.py — Servidor MCP remoto para bilbao-render-stack
 import os
-from fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -36,14 +36,11 @@ class BearerAuth(BaseHTTPMiddleware):
 async def health(_): return JSONResponse({"status": "healthy"})
 async def root(_):   return JSONResponse({"status": "ok", "service": "bilbao-render-stack"})
 
-mcp_asgi = mcp.http_app(transport="sse")
-
 app = Starlette(
     routes=[
         Route("/", root),
         Route("/health", health),
-        Mount("/", app=mcp_asgi),
+        Mount("/", app=mcp.sse_app()),
     ],
     middleware=[Middleware(BearerAuth)],
-    lifespan=mcp_asgi.lifespan,
 )
