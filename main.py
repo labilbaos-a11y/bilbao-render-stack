@@ -1,30 +1,46 @@
+# main.py — Servidor MCP remoto para bilbao-render-stack
 import os
-from fastapi import FastAPI, Request, HTTPException
+from fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+from starlette.routing import Mount, Route
 
-app = FastAPI(title="bilbao-render-stack")
+MCP_AUTH_TOKEN = os.environ["MCP_AUTH_TOKEN"]
 
-VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN", "changeme")
+mcp = FastMCP("bilbao-render-stack")
 
-@app.get("/")
-def root():
-    return {"status": "ok", "service": "bilbao-render-stack"}
+@mcp.tool()
+def ping() -> str:
+    """Healthcheck tool. Devuelve pong si el MCP está vivo."""
+    return "pong"
 
-@app.get("/health")
-def health():
-    return {"status": "healthy"}
+@mcp.tool()
+def whoami() -> dict:
+    """Devuelve info básica del servidor MCP."""
+    return {"service": "bilbao-render-stack", "status": "ok"}
 
-@app.get("/webhook")
-def verify_webhook(request: Request):
-    params = request.query_params
-    mode = params.get("hub.mode")
-    token = params.get("hub.verify_token")
-    challenge = params.get("hub.challenge")
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return int(challenge) if challenge and challenge.isdigit() else challenge
-    raise HTTPException(status_code=403, detail="Verification failed")
+# A medida que sumes integraciones (Meta Ads, GA4, GMB, Make, Reservo)
+# agregás más @mcp.tool() acá.
 
-@app.post("/webhook")
-async def receive_webhook(request: Request):
-    payload = await request.json()
-    print("Webhook recibido:", payload)
-    return {"received": True}
+class BearerAuth(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if request.url.path in ("/", "/health"):
+            return await call_next(request)
+        auth = request.headers.get("authorization", "")
+        if auth != f"Bearer {MCP_AUTH_TOKEN}":
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return await call_next(request)
+
+async def health(_): return JSONResponse({"status": "healthy"})
+async def root(_):   return JSONResponse({"status": "ok", "service": "bilbao-render-stack"})
+
+app = Starlette(
+    routes=[
+        Route("/", root),
+        Route("/health", health),
+        Mount("/", app=mcp.sse_app()),
+    ],
+    middleware=[Middleware(BearerAuth)],
+)
