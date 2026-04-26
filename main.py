@@ -36,11 +36,14 @@ class BearerAuth(BaseHTTPMiddleware):
 async def health(_): return JSONResponse({"status": "healthy"})
 async def root(_):   return JSONResponse({"status": "ok", "service": "bilbao-render-stack"})
 
+mcp_asgi = mcp.http_app(transport="sse")
+
 app = Starlette(
     routes=[
         Route("/", root),
         Route("/health", health),
-        Mount("/", app=mcp.sse_app()),
+        Mount("/", app=mcp_asgi),
     ],
     middleware=[Middleware(BearerAuth)],
+    lifespan=mcp_asgi.lifespan,
 )
