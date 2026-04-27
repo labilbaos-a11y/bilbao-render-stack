@@ -1,7 +1,7 @@
 # main.py — Servidor MCP remoto para bilbao-render-stack
 import contextlib
 import os
-from datetime import date, timedelta
+from datetime import date, datetime as _dt, timedelta
 from typing import Optional
 
 import requests
@@ -62,10 +62,10 @@ def _meta_check_page() -> Optional[dict]:
     return _need("META_ACCESS_TOKEN", META_ACCESS_TOKEN) or _need("META_FB_PAGE_ID", META_FB_PAGE_ID)
 
 
-def _meta_get(path: str, params: Optional[dict] = None) -> dict:
+def _meta_get(path: str, params: Optional[dict] = None, token: Optional[str] = None) -> dict:
     """GET a la Graph API de Meta. Devuelve dict con la respuesta o {error: ...}."""
     p = dict(params or {})
-    p["access_token"] = META_ACCESS_TOKEN
+    p["access_token"] = token or META_ACCESS_TOKEN
     try:
         r = requests.get(f"{META_GRAPH}/{path}", params=p, timeout=30)
         data = r.json()
@@ -79,12 +79,12 @@ def _meta_get(path: str, params: Optional[dict] = None) -> dict:
         return {"error": f"network error: {exc}"}
 
 
-def _meta_post(path: str, payload: dict) -> dict:
+def _meta_post(path: str, payload: dict, token: Optional[str] = None) -> dict:
     """POST a la Graph API de Meta (JSON). Devuelve respuesta o {error: ...}."""
     try:
         r = requests.post(
             f"{META_GRAPH}/{path}",
-            params={"access_token": META_ACCESS_TOKEN},
+            params={"access_token": token or META_ACCESS_TOKEN},
             json=payload,
             timeout=30,
         )
@@ -97,6 +97,30 @@ def _meta_post(path: str, payload: dict) -> dict:
         return data
     except requests.RequestException as exc:
         return {"error": f"network error: {exc}"}
+
+
+# Cache simple para no pedir el page token en cada call
+_PAGE_TOKEN_CACHE: dict = {"token": None}
+
+
+def _get_page_token() -> Optional[str]:
+    """Devuelve un Page Access Token para META_FB_PAGE_ID, usando el user token.
+    Cachea en memoria para evitar llamadas repetidas. Devuelve None si falla.
+    """
+    if _PAGE_TOKEN_CACHE.get("token"):
+        return _PAGE_TOKEN_CACHE["token"]
+    if not META_ACCESS_TOKEN or not META_FB_PAGE_ID:
+        return None
+    data = _meta_get("me/accounts", {"fields": "id,access_token", "limit": 200})
+    if "error" in data:
+        return None
+    for p in data.get("data", []):
+        if str(p.get("id")) == str(META_FB_PAGE_ID):
+            tok = p.get("access_token")
+            if tok:
+                _PAGE_TOKEN_CACHE["token"] = tok
+                return tok
+    return None
 
 
 def _resolver_periodo(periodo: str) -> tuple:
@@ -324,7 +348,7 @@ def wsp_listar_plantillas(limite: int = 25, solo_aprobadas: bool = True) -> dict
     limite = max(1, min(int(limite or 25), 100))
     data = _meta_get(
         f"{META_WABA_ID}/message_templates",
-        {"fields": "name,language,status,category,components", "limit": limite},
+        {"fields": "name,language,status,category", "limit": limite},
     )
     if "error" in data:
         return data
@@ -352,11 +376,8 @@ def wsp_metricas_conversaciones(periodo: str = "ultimos_30d") -> dict:
     if err:
         return err
     since, until = _resolver_periodo(periodo)
-    # La Graph API espera epoch en segundos para conversation_analytics
-    import time as _time
-    from datetime import datetime as _dt
     start_ts = int(_dt.fromisoformat(since).timestamp())
-    end_ts = int(_dt.fromisoformat(until).timestamp()) + 86399  # fin del día
+    end_ts = int(_dt.fromisoformat(until).timestamp()) + 86399
     data = _meta_get(
         META_WABA_ID,
         {
@@ -443,9 +464,11 @@ def fb_info_pagina() -> dict:
     err = _meta_check_page()
     if err:
         return err
+    page_token = _get_page_token() or META_ACCESS_TOKEN
     data = _meta_get(
         META_FB_PAGE_ID,
         {"fields": "name,category,fan_count,followers_count,about,website,link,verification_status"},
+        token=page_token,
     )
     if "error" in data:
         return data
@@ -473,12 +496,16 @@ def fb_publicaciones_recientes(limite: int = 5) -> dict:
     if err:
         return err
     limite = max(1, min(int(limite or 5), 25))
+    page_token = _get_page_token()
+    if not page_token:
+        return {"error": "no se pudo obtener el Page Access Token; verifica que el usuario es admin de la página"}
     data = _meta_get(
         f"{META_FB_PAGE_ID}/posts",
         {
             "fields": "id,message,created_time,permalink_url,reactions.summary(true),comments.summary(true),shares",
             "limit": limite,
         },
+        token=page_token,
     )
     if "error" in data:
         return data
@@ -504,8 +531,6 @@ def fb_publicaciones_recientes(limite: int = 5) -> dict:
 
 
 # ---------- Auth + montaje ASGI ----------
-# Wrapper ASGI puro (sin BaseHTTPMiddleware) que protege /mcp con Bearer.
-# No bufferiza la respuesta, compatible con streaming.
 def bearer_auth(app):
     async def wrapped(scope, receive, send):
         if scope["type"] != "http":
@@ -527,8 +552,6 @@ async def root(_):
     return JSONResponse({"status": "ok", "service": "bilbao-render-stack"})
 
 
-# Construimos el sub-app del MCP UNA sola vez para reusar su lifespan,
-# que es lo que arranca el task group interno del transport Streamable HTTP.
 mcp_asgi = mcp.streamable_http_app()
 
 
