@@ -7,7 +7,9 @@ from starlette.routing import Mount, Route
 
 MCP_AUTH_TOKEN = os.environ["MCP_AUTH_TOKEN"]
 
-mcp = FastMCP("bilbao-render-stack")
+# streamable_http_path="/" hace que el sub-app sirva en raíz, así
+# al montarlo en /mcp la URL pública final queda en /mcp/.
+mcp = FastMCP("bilbao-render-stack", streamable_http_path="/")
 
 @mcp.tool()
 def ping() -> str:
