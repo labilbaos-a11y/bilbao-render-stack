@@ -2,8 +2,6 @@
 import os
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
@@ -14,7 +12,7 @@ mcp = FastMCP("bilbao-render-stack")
 @mcp.tool()
 def ping() -> str:
     """Healthcheck tool. Devuelve pong si el MCP está vivo."""
-    return "pong"
+    return "pong 🏓"
 
 @mcp.tool()
 def whoami() -> dict:
@@ -24,23 +22,27 @@ def whoami() -> dict:
 # A medida que sumes integraciones (Meta Ads, GA4, GMB, Make, Reservo)
 # agregás más @mcp.tool() acá.
 
-class BearerAuth(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        if request.url.path in ("/", "/health"):
-            return await call_next(request)
-        auth = request.headers.get("authorization", "")
+# Wrapper ASGI puro (sin BaseHTTPMiddleware) que protege /mcp con Bearer.
+# No bufferiza la respuesta, compatible con streaming.
+def bearer_auth(app):
+    async def wrapped(scope, receive, send):
+        if scope["type"] != "http":
+            return await app(scope, receive, send)
+        headers = dict(scope.get("headers") or [])
+        auth = headers.get(b"authorization", b"").decode()
         if auth != f"Bearer {MCP_AUTH_TOKEN}":
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return await call_next(request)
+            response = JSONResponse({"error": "unauthorized"}, status_code=401)
+            return await response(scope, receive, send)
+        return await app(scope, receive, send)
+    return wrapped
 
 async def health(_): return JSONResponse({"status": "healthy"})
-async def root(_):   return JSONResponse({"status": "ok", "service": "bilbao-render-stack"})
+async def root(_): return JSONResponse({"status": "ok", "service": "bilbao-render-stack"})
 
 app = Starlette(
     routes=[
         Route("/", root),
         Route("/health", health),
-        Mount("/", app=mcp.sse_app()),
+        Mount("/mcp", app=bearer_auth(mcp.streamable_http_app())),
     ],
-    middleware=[Middleware(BearerAuth)],
 )
