@@ -1,4 +1,5 @@
 # main.py — Servidor MCP remoto para bilbao-render-stack
+import contextlib
 import os
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
@@ -41,10 +42,20 @@ def bearer_auth(app):
 async def health(_): return JSONResponse({"status": "healthy"})
 async def root(_): return JSONResponse({"status": "ok", "service": "bilbao-render-stack"})
 
+# Construimos el sub-app del MCP UNA sola vez para reusar su lifespan,
+# que es lo que arranca el task group interno del transport Streamable HTTP.
+mcp_asgi = mcp.streamable_http_app()
+
+@contextlib.asynccontextmanager
+async def lifespan(app):
+    async with mcp_asgi.router.lifespan_context(app):
+        yield
+
 app = Starlette(
     routes=[
         Route("/", root),
         Route("/health", health),
-        Mount("/mcp", app=bearer_auth(mcp.streamable_http_app())),
+        Mount("/mcp", app=bearer_auth(mcp_asgi)),
     ],
+    lifespan=lifespan,
 )
